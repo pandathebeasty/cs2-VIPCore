@@ -36,45 +36,59 @@ public class VIP_NightVip : BasePlugin
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     private VIP_NightVipConfig Config = null!;
-    
+
     private TimeZoneInfo _timeZoneInfo = TimeZoneInfo.Utc;
     private TimeSpan _startTime;
     private TimeSpan _endTime;
     private bool _timeConfigValid = true;
-    
+
     private bool _debugEnabled = false;
 
     private static readonly JsonSerializerOptions PrettyJsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
+    
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        const string configPath = "vip_night";
-
+        const string configName = "vip_night";
+        
         _api = PluginCapability.Get();
         if (_api == null)
         {
             ForceLogError("VipCoreApi not available. Plugin disabled.");
             return;
         }
-
-        Config = _api.LoadConfig<VIP_NightVipConfig>(configPath) ?? CreateConfig(configPath);
+        
+        Config = _api.LoadConfig<VIP_NightVipConfig>(configName) ?? CreateConfig(configName);
         _debugEnabled = Config.Debug;
+
+        var configPath = GetConfigPath(configName);
         
         try
         {
+            string updatedJson = JsonSerializer.Serialize(Config, PrettyJsonOptions);
+
             if (File.Exists(configPath))
             {
                 string existingJson = File.ReadAllText(configPath);
-                string updatedJson = JsonSerializer.Serialize(Config, PrettyJsonOptions);
 
                 if (!string.Equals(existingJson, updatedJson, StringComparison.Ordinal))
                 {
-                    ForceLogInfo("Config updated: new fields detected and added automatically.");
                     File.WriteAllText(configPath, updatedJson);
+                    ForceLogInfo("Configuration updated.");
                 }
+                else
+                {
+                    ForceLogInfo("Configuration is up to date.");
+                }
+            }
+            else
+            {
+                File.WriteAllText(configPath, updatedJson);
+                ForceLogInfo("Configuration file missing. A new one has been created.");
             }
         }
         catch (Exception ex)
@@ -175,7 +189,7 @@ public class VIP_NightVip : BasePlugin
         _api.GiveClientTemporaryVip(player, Config.VIPGroup, remainingMinutes);
         _api.PrintToChat(player, $" \x02{Config.Tag} \x01{Config.VipGrantedMessage}");
 
-        LogInfo($"Gave temporary VIP ({Config.VIPGroup}) to {player.PlayerName} for {remainingMinutes} minutes.");
+        LogInfo($"Gave temporary VIP ({Config.VIPGroup}) to {player?.PlayerName} for {remainingMinutes} minutes.");
     }
 
     private int CalculateRemainingVipTimeMinutes(TimeSpan endTime, TimeSpan currentTime)
@@ -196,8 +210,28 @@ public class VIP_NightVip : BasePlugin
                && player.PlayerPawn.IsValid
                && player.PawnIsAlive;
     }
+    
+    private string GetConfigPath(string configName)
+    {
+        var baseDir = Path.Combine(
+            Server.GameDirectory,
+            "csgo",
+            "addons",
+            "counterstrikesharp",
+            "configs",
+            "plugins",
+            "VIPCore",
+            "Modules"
+        );
 
-    private VIP_NightVipConfig CreateConfig(string configPath)
+        Directory.CreateDirectory(baseDir);
+        var fullPath = Path.Combine(baseDir, $"{configName}.json");
+        
+        ForceLogInfo($"Configuration path: {fullPath}");
+        return fullPath;
+    }
+
+    private VIP_NightVipConfig CreateConfig(string configName)
     {
         var config = new VIP_NightVipConfig
         {
@@ -213,26 +247,27 @@ public class VIP_NightVip : BasePlugin
 
         try
         {
+            var configPath = GetConfigPath(configName);
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, PrettyJsonOptions));
             ForceLogInfo($"Default config created at path: {configPath}");
         }
         catch (Exception ex)
         {
-            ForceLogError($"Failed to write configuration file '{configPath}': {ex.Message}");
+            ForceLogError($"Failed to write configuration file for '{configName}': {ex.Message}");
         }
 
         return config;
     }
 
-    // ---- Logging helpers ----
-    
+    private string LogTag => Config?.Tag ?? "[NightVIP]";
+
     private void LogInfo(string message)
     {
         if (!_debugEnabled)
             return;
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"[NightVIP] {message}");
+        Console.WriteLine($"{LogTag} {message}");
         Console.ResetColor();
     }
 
@@ -242,21 +277,21 @@ public class VIP_NightVip : BasePlugin
             return;
 
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"[NightVIP] {message}");
+        Console.WriteLine($"{LogTag} {message}");
         Console.ResetColor();
     }
-    
+
     private void ForceLogInfo(string message)
     {
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"[NightVIP] {message}");
+        Console.WriteLine($"{LogTag} {message}");
         Console.ResetColor();
     }
 
     private void ForceLogError(string message)
     {
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"[NightVIP] {message}");
+        Console.WriteLine($"{LogTag} {message}");
         Console.ResetColor();
     }
 }
