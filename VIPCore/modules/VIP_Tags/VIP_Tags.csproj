@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.374" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="VipCoreApi">
+      <HintPath>..\..\VipCoreApi.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Shared ChatManager API (ships once in addons/counterstrikesharp/shared). -->
+    <Reference Include="ChatManagerApi">
+      <HintPath>3rd_party\ChatManagerApi.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
