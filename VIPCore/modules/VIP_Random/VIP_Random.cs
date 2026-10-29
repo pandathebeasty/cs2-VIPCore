@@ -2,7 +2,7 @@ using System.Text.Json;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
-using VipCoreApi;
+using VipCoreApi; 
 
 namespace VIP_Random;
 
@@ -11,7 +11,7 @@ public class VIP_Random : BasePlugin
     public override string ModuleName => "[VIP] Random";
     public override string ModuleAuthor => "T3Marius";
     public override string ModuleDescription => "After x rounds from the map start, select random VIP.";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _vipApi;
     private Config _config = null!;
@@ -82,7 +82,6 @@ public class VIP_Random : BasePlugin
                 {
                     GetRandomVIP();
                     _currentRound = 0; // Reset the round counter after selecting a VIP
-                    _vipAssigned = true; // Set the flag to indicate a VIP has been assigned
                 }
             }
             else
@@ -96,9 +95,10 @@ public class VIP_Random : BasePlugin
     public HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
         var player = @event.Userid;
-        if (player == RandomVIP)
+        if (player != null && RandomVIP != null && player.Slot == RandomVIP.Slot)
         {
-            _vipApi?.RemoveClientVip(RandomVIP!);
+            _vipApi?.RemovePlayerVip(player);
+            RandomVIP = null;
             _vipAssigned = false; // Reset the VIP assignment flag if the VIP disconnects
         }
         return HookResult.Continue;
@@ -107,6 +107,7 @@ public class VIP_Random : BasePlugin
     public void OnMapStart(string mapName)
     {
         _currentRound = 0;
+        RandomVIP = null;
         _vipAssigned = false; // Reset the flag for the new map
     }
 
@@ -116,13 +117,13 @@ public class VIP_Random : BasePlugin
         if (player != null && player.IsValid)
         {
             // Check if the player is already a VIP
-            if (_vipApi != null && !_vipApi.IsClientVip(player))
+            if (_vipApi != null && !_vipApi.IsPlayerVip(player))
             {
                 string localizedMessage = Localizer["vip.selected"];
                 string message = localizedMessage.Replace("{playerName}", player.PlayerName);
                 Server.PrintToChatAll(Localizer["prefix"] + message);
                 player.PrintToChat(Localizer["prefix"] + Localizer["vip.player.message"]);
-                _vipApi.GiveClientVip(player, _config.RandomVIPGroup, 1800); // Adding a duration parameter
+                _vipApi.GivePlayerTemporaryVip(player, _config.RandomVIPGroup, 1800);
                 RandomVIP = player;
                 _vipAssigned = true; // Set the flag to indicate a VIP has been assigned
             }

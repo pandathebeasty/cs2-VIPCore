@@ -1,6 +1,7 @@
 ﻿using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using VipCoreApi;
+using VipCoreApi.Enums;
 
 namespace VIP_Items;
 
@@ -8,7 +9,7 @@ public class VipItems : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Items";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "v2.0.0";
 
     private Items _items = null!;
     private IVipCoreApi? _api;
@@ -21,42 +22,27 @@ public class VipItems : BasePlugin
         if (_api == null) return;
 
         _items = new Items(_api);
-        _api.RegisterFeature(_items);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_items);
+        _items?.Dispose();
     }
 }
 
-public class Items : VipFeatureBase
+public class Items : VipFeature<Dictionary<string, List<string>>>
 {
-    public override string Feature => "Items";
-    
-    private readonly Dictionary<string, int> _grenadeIndex = new()
-    {
-        ["flashbang"] = 14, 
-        ["smokegrenade"] = 15,
-        ["decoy"] = 17,
-        ["incgrenade"] = 16,
-        ["molotov"] = 16,
-        ["hegrenade"] = 13
-    };
-    
-    public Items(IVipCoreApi api) : base(api)
+    public Items(IVipCoreApi api) : base("Items", api)
     {
     }
 
-    public override void OnPlayerSpawn(CCSPlayerController player)
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip)
     {
-        if (IsPistolRound()) return;
+        if (!vip || IsPistolRound()) return;
 
-        if (!PlayerHasFeature(player)) return;
-        if (GetPlayerFeatureState(player) is IVipCoreApi.FeatureState.Disabled
-            or IVipCoreApi.FeatureState.NoAccess) return;
+        if (!IsFeatureEnabled(player)) return;
 
-        var itemsConfig = GetFeatureValue<Dictionary<string, List<string>>?>(player);
+        var itemsConfig = GetValue(player);
         if (itemsConfig == null) return;
 
         var teamKey = player.TeamNum switch
@@ -78,16 +64,10 @@ public class Items : VipFeatureBase
 
         foreach (var item in items)
         {
-            var itemName = _grenadeIndex.ContainsKey(item) ? item : null;
-            var ammoIndex = itemName != null ? _grenadeIndex[item] : -1;
-            
-            if (itemName != null && weaponService.Ammo[ammoIndex] == 0)
-                player.GiveNamedItem(item);
-            else
-            {
-                if (weaponService.MyWeapons.ToList().Find(m => m.Value != null && m.Value.DesignerName == item) == null)
-                    player.GiveNamedItem(item);
-            }
+            var itemName = item.StartsWith("weapon_") || item.StartsWith("item_") ? item : $"weapon_{item}";
+
+            if (weaponService.MyWeapons.ToList().Find(m => m.Value != null && m.Value.DesignerName == itemName) == null)
+                player.GiveNamedItem(itemName);
         }
     }
 }

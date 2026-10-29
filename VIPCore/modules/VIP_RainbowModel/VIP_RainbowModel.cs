@@ -4,7 +4,7 @@ using CounterStrikeSharp.API.Modules.Timers;
 using System.Drawing;
 using CounterStrikeSharp.API.Core.Capabilities;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
 using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace VIP_RainbowModel;
@@ -13,10 +13,10 @@ public class VipRainbowModel : BasePlugin
 {
     public override string ModuleAuthor => "WodiX";
     public override string ModuleName => "[VIP] RainbowModel";
-    public override string ModuleVersion => "v1.0.4";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _api;
-    private RainbowModel _rainbowModel;
+    private RainbowModel? _rainbowModel;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -26,23 +26,21 @@ public class VipRainbowModel : BasePlugin
         if (_api == null) return;
 
         _rainbowModel = new RainbowModel(this, _api);
-        _api.RegisterFeature(_rainbowModel);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_rainbowModel);
+        _rainbowModel?.Dispose();
     }
 }
 
-public class RainbowModel : VipFeatureBase
+public class RainbowModel : VipFeature<bool>
 {
     private readonly BasePlugin _basePlugin;
-    public override string Feature => "RainbowModel";
 
     private readonly Timer?[] _rainbowTimer = new Timer?[70];
 
-    public RainbowModel(BasePlugin basePlugin, IVipCoreApi api) : base(api)
+    public RainbowModel(BasePlugin basePlugin, IVipCoreApi api) : base("RainbowModel", api)
     {
         _basePlugin = basePlugin;
         basePlugin.RegisterListener<Listeners.OnClientConnected>(slot => _rainbowTimer[slot] = null);
@@ -66,14 +64,14 @@ public class RainbowModel : VipFeatureBase
         });
     }
 
-    public override void OnPlayerSpawn(CCSPlayerController player)
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip)
     {
-        if (!PlayerHasFeature(player)) return;
-        if (GetPlayerFeatureState(player) is not FeatureState.Enabled) return;
+        if (!vip) return;
+        if (!IsFeatureEnabled(player)) return;
 
         var playerPawnValue = player.PlayerPawn.Value;
 
-        var rainbowModelValue = GetFeatureValue<bool>(player);
+        var rainbowModelValue = GetValue(player);
 
         if (playerPawnValue == null) return;
         if (!rainbowModelValue) return;
@@ -85,14 +83,16 @@ public class RainbowModel : VipFeatureBase
             TimerFlags.REPEAT);
     }
 
-    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    public override void OnSelectItem(CCSPlayerController player, VipFeature feature)
     {
         var playerPawn = player.PlayerPawn.Value;
         if (playerPawn == null) return;
 
-        if (state == FeatureState.Disabled)
+        _rainbowTimer[player.Slot]?.Kill();
+        _rainbowTimer[player.Slot] = null;
+
+        if (GetPlayerFeatureState(player) == FeatureState.Disabled || !GetValue(player))
         {
-            _rainbowTimer[player.Slot]?.Kill();
             SetRainbowModel(playerPawn);
             return;
         }
@@ -102,8 +102,20 @@ public class RainbowModel : VipFeatureBase
                 Random.Shared.Next(0, 255), Random.Shared.Next(0, 255)), TimerFlags.REPEAT);
     }
 
+    public override void OnPlayerRemoved(CCSPlayerController player, string group)
+    {
+        _rainbowTimer[player.Slot]?.Kill();
+        _rainbowTimer[player.Slot] = null;
+
+        var playerPawn = player.PlayerPawn.Value;
+        if (playerPawn != null)
+            SetRainbowModel(playerPawn);
+    }
+
     private void SetRainbowModel(CCSPlayerPawn pawn, int r = 255, int g = 255, int b = 255)
     {
+        if (!pawn.IsValid) return;
+
         pawn.Render = Color.FromArgb(255, r, g, b);
         Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_clrRender");
     }

@@ -8,7 +8,7 @@ using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
 using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace VIP_Flags;
@@ -17,10 +17,10 @@ public class VipFlags : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Flags";
-    public override string ModuleVersion => "v1.0.1";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _api;
-    private Flags _flags;
+    private Flags? _flags;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -31,22 +31,21 @@ public class VipFlags : BasePlugin
         if (_api == null) return;
 
         _flags = new Flags(this, _api);
-        _api.RegisterFeature(_flags, FeatureType.Hide);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_flags);
+        _flags?.Dispose();
     }
 }
 
-public class Flags : VipFeatureBase
+public class Flags : VipFeature<List<string>>
 {
     private readonly VipFlags _vipFlags;
-    public override string Feature => "flags";
     private readonly Dictionary<ulong, List<string>> _flags = new();
+    private readonly Timer?[] _timers = new Timer?[64];
 
-    public Flags(VipFlags vipFlags, IVipCoreApi api) : base(api)
+    public Flags(VipFlags vipFlags, IVipCoreApi api) : base("flags", api, FeatureType.Hide)
     {
         _vipFlags = vipFlags;
         vipFlags.RegisterEventHandler<EventPlayerDisconnect>((@event, _) =>
@@ -55,30 +54,41 @@ public class Flags : VipFeatureBase
 
             if (player is null || !player.IsValid) return HookResult.Continue;
 
-            if (IsClientVip(player) && PlayerHasFeature(player))
-            {
-                RemovePlayerPermissions(player);
-            }
+            KillTimer(player.Slot);
+            RemovePlayerPermissions(player);
 
             return HookResult.Continue;
         });
     }
 
-    public override void OnPlayerLoaded(CCSPlayerController player, string group)
+    public override void OnPlayerAuthorized(CCSPlayerController player, string group)
     {
+        KillTimer(player.Slot);
+        RemovePlayerPermissions(player);
+
         if (!PlayerHasFeature(player)) return;
 
-        Timer timer = null!;
+        var slot = player.Slot;
 
-        timer = _vipFlags.AddTimer(1f, () =>
+        _timers[slot] = _vipFlags.AddTimer(1f, () =>
         {
-            if (!player.IsValid || player.Connected != PlayerConnectedState.Connected)
+            if (!player.IsValid || player.Connected is PlayerConnectedState.Disconnecting
+                    or PlayerConnectedState.Disconnected)
+            {
+                KillTimer(slot);
                 return;
+            }
+
+            if (player.Connected != PlayerConnectedState.Connected)
+                return;
+
+            KillTimer(slot);
+
+            var flagsOrGroups = GetValue(player);
+            if (flagsOrGroups is null) return;
 
             if (!_flags.ContainsKey(player.SteamID))
                 _flags.Add(player.SteamID, []);
-
-            var flagsOrGroups = GetFeatureValue<List<string>>(player);
 
             var steamId = new SteamID(player.SteamID);
             foreach (var flagOrGroup in flagsOrGroups)
@@ -90,14 +100,19 @@ public class Flags : VipFeatureBase
 
                 _flags[player.SteamID].Add(flagOrGroup);
             }
-
-            timer.Kill();
         }, TimerFlags.REPEAT);
     }
 
     public override void OnPlayerRemoved(CCSPlayerController player, string group)
     {
+        KillTimer(player.Slot);
         RemovePlayerPermissions(player);
+    }
+
+    private void KillTimer(int slot)
+    {
+        _timers[slot]?.Kill();
+        _timers[slot] = null;
     }
 
     private void RemovePlayerPermissions(CCSPlayerController player)

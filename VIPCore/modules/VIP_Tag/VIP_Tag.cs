@@ -1,13 +1,15 @@
-﻿using System.Text.Json.Serialization;
+﻿using System.Text.Json;
+using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
+using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using CS2_SimpleAdminApi;
 using Microsoft.Extensions.Logging;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
 
 namespace VIP_Tag;
 
@@ -15,7 +17,7 @@ public class VIPTag : BasePlugin
 {
     public override string ModuleAuthor => "Toil";
     public override string ModuleName => "[VIP] Tag";
-    public override string ModuleVersion => "v1.1.0";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _api;
     private Tag? _tag;
@@ -28,13 +30,11 @@ public class VIPTag : BasePlugin
         if (_api == null) return;
 
         _tag = new Tag(this, _api);
-        // Toggle: the player can Enable/Disable the tag from the !vip menu.
-        _api.RegisterFeature(_tag, FeatureType.Toggle);
     }
 
     public override void Unload(bool hotReload)
     {
-        if (_tag != null) _api?.UnRegisterFeature(_tag);
+        _tag?.Dispose();
     }
 }
 
@@ -60,18 +60,31 @@ public class TagValue
     [JsonPropertyName("MessageColor")] public string MessageColor { get; set; } = "";
 }
 
-public class Tag : VipFeatureBase
+public class TagsConfig
 {
-    public override string Feature => "Tag";
+    public Dictionary<string, List<TagValue>> TagSets { get; set; } = new();
+    public Dictionary<string, JsonElement> Players { get; set; } = new();
+}
+
+public class Tag : VipFeature<JsonElement>
+{
+    private const string ChoiceCookie = "player_tag";
+    private const string ChoiceOff = "off";
+
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly VIPTag _plugin;
+    private Dictionary<string, List<TagValue>> _tagSets = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<ulong, List<TagValue>> _personalTags = new();
+    private readonly HashSet<string> _missingSets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<ulong> _taggedPlayers = new();
 
     // Gag/silence sources, auto-detected at load. Any, all, or none may be present.
     private ICS2_SimpleAdminApi? _simpleAdmin;
     private AdminPlusGagReader? _adminPlus;
     private IksAdminGagReader? _iksAdmin;
 
-    public Tag(VIPTag vipTag, IVipCoreApi api) : base(api)
+    public Tag(VIPTag vipTag, IVipCoreApi api) : base("Tag", api, FeatureType.Selectable)
     {
         _plugin = vipTag;
 
@@ -79,8 +92,94 @@ public class Tag : VipFeatureBase
         vipTag.AddCommandListener("say", OnSay, HookMode.Pre);
         vipTag.AddCommandListener("say_team", OnSayTeam, HookMode.Pre);
 
+        vipTag.AddCommand("css_tag", "Choose your tag", (player, _) =>
+        {
+            if (player is { IsValid: true }) OpenTagMenu(player);
+        });
+        vipTag.AddCommand("css_tag_reload", "Reload vip_tag.json", (player, info) =>
+        {
+            if (player != null && !AdminManager.PlayerHasPermissions(player, "@css/root")) return;
+            LoadTagsConfig();
+            _missingSets.Clear();
+            foreach (var p in Utilities.GetPlayers()) ApplyScoreboard(p);
+            info.ReplyToCommand($"[VIP_Tag] Loaded {_tagSets.Count} tag set(s), personal tags for {_personalTags.Count} player(s).");
+        });
+
+        vipTag.RegisterEventHandler<EventPlayerSpawn>((@event, _) =>
+        {
+            if (@event.Userid is { } player) ApplyScoreboard(player);
+            return HookResult.Continue;
+        });
+
+        LoadTagsConfig();
         DetectGagBackends();
     }
+
+    private void LoadTagsConfig()
+    {
+        var sets = new Dictionary<string, List<TagValue>>(StringComparer.OrdinalIgnoreCase);
+        var tags = new Dictionary<ulong, List<TagValue>>();
+        try
+        {
+            var config = LoadConfig<TagsConfig>("vip_tag");
+            foreach (var (name, list) in config.TagSets)
+                sets[name] = list.Where(IsUsable).ToList();
+            _tagSets = sets;
+
+            foreach (var (steamId, value) in config.Players)
+            {
+                if (!ulong.TryParse(steamId, out var steamId64))
+                {
+                    _plugin.Logger.LogWarning("[VIP_Tag] vip_tag.json: '{SteamId}' is not a SteamID64, skipped.", steamId);
+                    continue;
+                }
+
+                var list = ParseTags(value);
+                if (list.Count > 0) tags[steamId64] = list;
+            }
+        }
+        catch (Exception e)
+        {
+            _plugin.Logger.LogError("[VIP_Tag] Failed to load vip_tag.json: {Error}", e.Message);
+        }
+
+        _tagSets = sets;
+        _personalTags = tags;
+    }
+
+    private List<TagValue> ParseTags(JsonElement element)
+    {
+        var tags = new List<TagValue>();
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                    tags.AddRange(ParseTags(item));
+                break;
+
+            case JsonValueKind.String:
+                var name = element.GetString() ?? "";
+                if (_tagSets.TryGetValue(name, out var set))
+                    tags.AddRange(set);
+                else if (_missingSets.Add(name))
+                    _plugin.Logger.LogWarning("[VIP_Tag] Tag set '{Name}' not found in vip_tag.json.", name);
+                break;
+
+            case JsonValueKind.Object:
+                try
+                {
+                    if (element.Deserialize<TagValue>(JsonOptions) is { } tag && IsUsable(tag))
+                        tags.Add(tag);
+                }
+                catch (JsonException) { }
+                break;
+        }
+
+        return tags;
+    }
+
+    private static bool IsUsable(TagValue tag) =>
+        !string.IsNullOrEmpty(tag.ChatTag) || !string.IsNullOrEmpty(tag.ScoreboardTag);
 
     /// <summary>
     /// Auto-detects which admin plugin(s) provide gag/silence and wires to them:
@@ -115,9 +214,39 @@ public class Tag : VipFeatureBase
                                       "Gag and silence will NOT be enforced for the chat tag - a gagged player could still talk through it.");
     }
 
-    /// <summary>True only when the player is VIP, has the feature, and it is toggled Enabled.</summary>
-    private bool IsTagEnabled(CCSPlayerController player)
-        => PlayerHasFeature(player) && GetPlayerFeatureState(player) == FeatureState.Enabled;
+    private List<TagValue> GetAvailableTags(CCSPlayerController player)
+    {
+        var tags = new List<TagValue>();
+        if (_personalTags.TryGetValue(player.SteamID, out var personal))
+            tags.AddRange(personal);
+
+        if (PlayerHasFeature(player))
+        {
+            try { tags.AddRange(ParseTags(GetValue(player))); }
+            catch { }
+        }
+
+        return tags.DistinctBy(TagKey).ToList();
+    }
+
+    private TagValue? GetActiveTag(CCSPlayerController player)
+    {
+        var tags = GetAvailableTags(player);
+        if (tags.Count == 0) return null;
+
+        var choice = GetPlayerCookie<string>(player, ChoiceCookie);
+        if (choice == ChoiceOff) return null;
+
+        return tags.FirstOrDefault(t => TagKey(t) == choice) ?? tags[0];
+    }
+
+    private static string TagKey(TagValue tag) => $"{tag.ScoreboardTag}|{tag.ChatTag}";
+
+    private static string TagName(TagValue tag)
+    {
+        var name = TagColors.StripTokens(tag.ChatTag);
+        return string.IsNullOrEmpty(name) ? tag.ScoreboardTag : name;
+    }
 
     /// <summary>True when the player is currently gagged or silenced by the detected admin plugin.</summary>
     private bool IsChatBlocked(CCSPlayerController player)
@@ -150,12 +279,49 @@ public class Tag : VipFeatureBase
         return list.Any(p => !p.Passed && (p.Duration == 0 || p.EndDateTime > DateTime.UtcNow));
     }
 
-    // --- Toggle from the !vip menu ------------------------------------------------------------
 
-    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    public override void OnSelectItem(CCSPlayerController player, VipFeature feature)
     {
-        // Re-apply the scoreboard tag immediately so the change shows without waiting for a respawn.
-        ApplyScoreboard(player);
+        OpenTagMenu(player);
+    }
+
+    public override void OnPlayerRemoved(CCSPlayerController player, string group)
+    {
+        Server.NextFrame(() => ApplyScoreboard(player));
+    }
+
+    public override void OnPlayerDisconnect(CCSPlayerController player, bool vip)
+    {
+        _taggedPlayers.Remove(player.SteamID);
+    }
+
+    private void OpenTagMenu(CCSPlayerController player)
+    {
+        var tags = GetAvailableTags(player);
+        if (tags.Count == 0) return;
+
+        var current = GetActiveTag(player);
+        var menu = CreateMenu(GetTranslatedText(Name));
+
+        menu.AddMenuOption(GetTranslatedText("tag.Disable"), (controller, _) =>
+        {
+            SetPlayerCookie(controller, ChoiceCookie, ChoiceOff);
+            PrintToChat(controller, GetTranslatedText("tag.Off"));
+            ApplyScoreboard(controller);
+        }, current == null);
+
+        foreach (var tag in tags)
+        {
+            var key = TagKey(tag);
+            menu.AddMenuOption(TagName(tag), (controller, _) =>
+            {
+                SetPlayerCookie(controller, ChoiceCookie, key);
+                PrintToChat(controller, GetTranslatedText("tag.On", TagName(tag)));
+                ApplyScoreboard(controller);
+            }, current != null && TagKey(current) == key);
+        }
+
+        menu.Open(player);
     }
 
     // --- Chat rendering (standalone, coloured) ------------------------------------------------
@@ -177,15 +343,15 @@ public class Tag : VipFeatureBase
         if (IsChatTrigger(message))
             return HookResult.Continue;
 
-        if (!IsTagEnabled(player))
+        var tag = GetActiveTag(player);
+        if (tag == null)
             return HookResult.Continue;
 
         // A gagged / silenced player sends nothing - swallow it so the tag can't bypass the mute.
         if (IsChatBlocked(player))
             return HookResult.Handled;
 
-        var tag = GetTag(player);
-        if (tag == null || string.IsNullOrEmpty(tag.ChatTag))
+        if (string.IsNullOrEmpty(tag.ChatTag))
             return HookResult.Continue;
 
         var team = player.Team;
@@ -193,7 +359,8 @@ public class Tag : VipFeatureBase
         var nameColor = TagColors.ColorChar(tag.NameColor, team);
         var msgColor = TagColors.ColorChar(tag.MessageColor, team);
 
-        var line = $" {tagColor}{tag.ChatTag} {nameColor}{player.PlayerName}{ChatColors.Default}: {msgColor}{message}";
+        var teamPrefix = teamOnly ? $"{ChatColors.Default}(team) " : "";
+        var line = $" {tagColor}{tag.ChatTag} {teamPrefix}{nameColor}{player.PlayerName}{ChatColors.Default}: {msgColor}{message}";
 
         if (teamOnly)
         {
@@ -216,22 +383,18 @@ public class Tag : VipFeatureBase
     {
         if (player is not { IsValid: true } || player.IsBot || player.IsHLTV) return;
 
-        var tag = IsTagEnabled(player) ? GetTag(player) : null;
-        var clan = tag?.ScoreboardTag ?? string.Empty;
+        if (GetAvailableTags(player).Count == 0)
+        {
+            if (!_taggedPlayers.Remove(player.SteamID)) return;
 
-        player.Clan = clan;
+            player.Clan = string.Empty;
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_szClan");
+            return;
+        }
+
+        _taggedPlayers.Add(player.SteamID);
+        player.Clan = GetActiveTag(player)?.ScoreboardTag ?? string.Empty;
         Utilities.SetStateChanged(player, "CCSPlayerController", "m_szClan");
-    }
-
-    public override void OnPlayerSpawn(CCSPlayerController player)
-    {
-        ApplyScoreboard(player);
-    }
-
-    private TagValue? GetTag(CCSPlayerController player)
-    {
-        try { return GetFeatureValue<TagValue>(player); }
-        catch { return null; }
     }
 
     /// <summary>

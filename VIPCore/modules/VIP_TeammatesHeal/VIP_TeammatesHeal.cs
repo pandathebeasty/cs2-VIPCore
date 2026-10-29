@@ -4,6 +4,9 @@ using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Memory.DynamicFunctions;
 using VipCoreApi;
+using VipCoreApi.Args;
+using VipCoreApi.Enums;
+using System.Globalization;
 
 namespace VIP_TeammatesHeal;
 
@@ -11,7 +14,7 @@ public class VipTeammatesHeal : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Teammates Heal";
-    public override string ModuleVersion => "v1.0.0";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _api;
     private TeammatesHeal? _flags;
@@ -25,15 +28,11 @@ public class VipTeammatesHeal : BasePlugin
         if (_api == null) return;
 
         _flags = new TeammatesHeal(_api);
-        _api.RegisterFeature(_flags);
     }
 
     public override void Unload(bool hotReload)
     {
-        if (_flags is null) return;
-
-        _flags.Dispose();
-        _api?.UnRegisterFeature(_flags);
+        _flags?.Dispose();
     }
 }
 
@@ -44,24 +43,15 @@ public class Config
     public int HealPerShot { get; set; } = 25;
 }
 
-public class TeammatesHeal : VipFeatureBase, IDisposable
+public class TeammatesHeal : VipFeature<float>
 {
-    public override string Feature => "TeammatesHeal";
 
     private readonly Config _config;
-    private readonly float[] _healPercentages = new float[70];
 
-    public TeammatesHeal(IVipCoreApi api) : base(api)
+    public TeammatesHeal(IVipCoreApi api) : base("TeammatesHeal", api)
     {
         VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Hook(OnTakeDamage, HookMode.Pre);
         _config = LoadConfig<Config>("vip_teammates_heal");
-    }
-
-    public override void OnPlayerSpawn(CCSPlayerController player)
-    {
-        if (!PlayerHasFeature(player)) return;
-
-        _healPercentages[player.Slot] = GetFeatureValue<float>(player);
     }
 
     private HookResult OnTakeDamage(DynamicHook hook)
@@ -84,20 +74,14 @@ public class TeammatesHeal : VipFeatureBase, IDisposable
 
         if (attacker != player &&
             attacker.Team == player.Team &&
-            IsClientVip(attacker) &&
-            PlayerHasFeature(attacker))
+            IsFeatureEnabled(attacker))
         {
-            var weapon = damageInfo.Inflictor.Value?.As<CBasePlayerWeapon>();
-            if (weapon is null)
-            {
-                weapon = attacker.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
-                if (weapon is null)
-                {
-                    return HookResult.Continue;
-                }
-            }
+            var weaponName = GetWeaponName(damageInfo.Inflictor.Value, attacker);
+            if (weaponName is null)
+                return HookResult.Continue;
 
-            if (_config.WeaponBlacklist.Contains(weapon.DesignerName))
+            if (_config.WeaponBlacklist.Contains(weaponName) ||
+                (weaponName == "weapon_molotov" && _config.WeaponBlacklist.Contains("weapon_incgrenade")))
                 return HookResult.Continue;
 
             var health = playerPawn.Health;
@@ -110,7 +94,7 @@ public class TeammatesHeal : VipFeatureBase, IDisposable
             
             if (health >= maxHealth) return HookResult.Continue;
             
-            var healPercentage = _healPercentages[attacker.Slot];
+            var healPercentage = GetValue(attacker);
             
             var calculatedGain = (int)MathF.Ceiling(damageInfo.Damage / 100.0f * healPercentage);
             
@@ -126,6 +110,20 @@ public class TeammatesHeal : VipFeatureBase, IDisposable
         }
 
         return HookResult.Continue;
+    }
+
+    private static string? GetWeaponName(CEntityInstance? inflictor, CCSPlayerController attacker)
+    {
+        var name = inflictor?.DesignerName;
+        if (string.IsNullOrEmpty(name) || name == "player")
+            return attacker.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value?.DesignerName;
+
+        return name switch
+        {
+            "inferno" or "molotov_projectile" => "weapon_molotov",
+            _ when name.EndsWith("_projectile") => "weapon_" + name[..^"_projectile".Length],
+            _ => name
+        };
     }
 
     private static CCSPlayerController? GetPlayer(CBaseEntity? ent)
@@ -146,8 +144,15 @@ public class TeammatesHeal : VipFeatureBase, IDisposable
         return null;
     }
 
-    public void Dispose()
+    public override void Dispose()
     {
         VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Unhook(OnTakeDamage, HookMode.Pre);
+        base.Dispose();
+    }
+
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        if (args.State == FeatureState.Enabled)
+            args.Display = $"[{GetValue(args.Controller).ToString("0.#", CultureInfo.InvariantCulture)}%]";
     }
 }

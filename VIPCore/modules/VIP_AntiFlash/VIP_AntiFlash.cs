@@ -1,7 +1,8 @@
 ﻿using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
+using VipCoreApi.Args;
 
 namespace VIP_AntiFlash;
 
@@ -9,7 +10,7 @@ public class VipAntiFlash : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Anti Flash";
-    public override string ModuleVersion => "v1.0.3";
+    public override string ModuleVersion => "v2.0.0";
    
     private IVipCoreApi? _api;
     private AntiFlash? _antiFlash;
@@ -23,33 +24,27 @@ public class VipAntiFlash : BasePlugin
         _api.OnCoreReady += () =>
         {
             _antiFlash = new AntiFlash(this, _api);
-            _api.RegisterFeature(_antiFlash);
         };
     }
 
     public override void Unload(bool hotReload)
     {
-        if (_antiFlash != null)
-        {
-            _api?.UnRegisterFeature(_antiFlash);
-        }
+        _antiFlash?.Dispose();
     }
 }
 
-public class AntiFlash : VipFeatureBase
+public class AntiFlash : VipFeature<int>
 {
-    public override string Feature => "Antiflash";
-
-    public AntiFlash(VipAntiFlash vipAntiFlash, IVipCoreApi api) : base(api)
+    public AntiFlash(VipAntiFlash vipAntiFlash, IVipCoreApi api) : base("Antiflash", api)
     {
         vipAntiFlash.RegisterEventHandler<EventPlayerBlind>((@event, info) =>
         {
             var player = @event.Userid;
             if (player == null || !player.IsValid) return HookResult.Continue;
 
-            if (!IsClientVip(player) || !PlayerHasFeature(player) || GetPlayerFeatureState(player) is not FeatureState.Enabled) return HookResult.Continue;
+            if (!IsFeatureEnabled(player)) return HookResult.Continue;
 
-            var featureValue = GetFeatureValue<int>(player);
+            var featureValue = GetValue(player);
             var attacker = @event.Attacker;
             var playerPawn = player.PlayerPawn.Value;
 
@@ -78,5 +73,20 @@ public class AntiFlash : VipFeatureBase
 
             return HookResult.Continue;
         });
+    }
+
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        if (args.State != FeatureState.Enabled) return;
+
+        var mode = GetValue(args.Controller) switch
+        {
+            1 => "antiflash.Team",
+            2 => "antiflash.Self",
+            3 => "antiflash.TeamSelf",
+            _ => "antiflash.All"
+        };
+
+        args.Display = $"[{GetTranslatedText(args.Controller, mode)}]";
     }
 }

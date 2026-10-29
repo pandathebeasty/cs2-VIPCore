@@ -7,7 +7,7 @@ using CounterStrikeSharp.API.Modules.Memory.DynamicFunctions;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
 
 namespace VIP_Bhop;
 
@@ -15,9 +15,9 @@ public class VIP_Bhop : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Bhop";
-    public override string ModuleVersion => "v1.0.3";
+    public override string ModuleVersion => "v2.0.0";
 
-    private Bhop _bhop;
+    private Bhop? _bhop;
     private IVipCoreApi? _api;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
@@ -28,56 +28,111 @@ public class VIP_Bhop : BasePlugin
         if (_api == null) return;
 
         _bhop = new Bhop(this, _api);
-        _api.RegisterFeature(_bhop);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_bhop);
+        _bhop?.Dispose();
     }
 }
 
-public class Bhop : VipFeatureBase
+public class Bhop : VipFeature<BhopSettings>
 {
-    public override string Feature => "Bhop";
+    private const float SpeedCapSmoothing = 0.5f;
 
     private readonly VIP_Bhop _vipBhop;
     private readonly BhopSettings[] _bhopSettings = new BhopSettings[70];
+    private readonly CCSPlayerController?[] _players = new CCSPlayerController?[65];
+    private readonly bool[] _bunnyhopReplicated = new bool[65];
 
-    public Bhop(VIP_Bhop vipBhop, IVipCoreApi api) : base(api)
+    public Bhop(VIP_Bhop vipBhop, IVipCoreApi api) : base("Bhop", api)
     {
         _vipBhop = vipBhop;
+        for (var i = 0; i < _bhopSettings.Length; i++)
+            _bhopSettings[i] = new BhopSettings();
+
         vipBhop.RegisterListener<Listeners.OnClientConnected>(slot => _bhopSettings[slot] = new BhopSettings());
-        vipBhop.RegisterListener<Listeners.OnClientDisconnectPost>(slot => _bhopSettings[slot] = new BhopSettings());
+        vipBhop.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
+        {
+            _bhopSettings[slot] = new BhopSettings();
+            _players[slot] = null;
+            _bunnyhopReplicated[slot] = false;
+        });
 
         vipBhop.RegisterEventHandler<EventRoundStart>(EventRoundStart);
 
         vipBhop.RegisterListener<Listeners.OnTick>(() =>
         {
-            foreach (var player in Utilities.GetPlayers()
-                         .Where(player => player is { IsValid: true, IsBot: false, PawnIsAlive: true }))
+            for (var slot = 0; slot < _players.Length; slot++)
             {
-                var settings = _bhopSettings[player.Slot];
-                if (!settings.Active || !settings.Enabled) continue;
+                var player = _players[slot];
+                if (player is null) continue;
+
+                if (!player.IsValid)
+                {
+                    _players[slot] = null;
+                    continue;
+                }
+
+                if (!IsFeatureEnabled(player))
+                {
+                    RemovePlayer(player);
+                    continue;
+                }
+
+                if (!player.PawnIsAlive || !_bhopSettings[slot].Active) continue;
 
                 OnTick(player);
             }
         });
+
+        Server.NextWorldUpdate(() =>
+        {
+            foreach (var player in Utilities.GetPlayers())
+                UpdatePlayer(player);
+        });
     }
 
-    public override void OnPlayerLoaded(CCSPlayerController player, string group)
+    public override void OnPlayerAuthorized(CCSPlayerController player, string group) => UpdatePlayer(player);
+
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip) => UpdatePlayer(player);
+
+    public override void OnSelectItem(CCSPlayerController player, VipFeature feature) => UpdatePlayer(player);
+
+    public override void OnPlayerRemoved(CCSPlayerController player, string group) => RemovePlayer(player);
+
+    public override void OnPlayerDisconnect(CCSPlayerController player, bool vip) => RemovePlayer(player);
+
+    private void UpdatePlayer(CCSPlayerController player)
     {
-        if (PlayerHasFeature(player))
-            _bhopSettings[player.Slot].Enabled = GetPlayerFeatureState(player) == FeatureState.Enabled;
+        if (player is not { IsValid: true, IsBot: false }) return;
+
+        if (!IsFeatureEnabled(player))
+        {
+            RemovePlayer(player);
+            return;
+        }
+
+        _players[player.Slot] = player;
+        _bhopSettings[player.Slot].Enabled = true;
     }
 
-    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    private void RemovePlayer(CCSPlayerController player)
     {
-        _bhopSettings[player.Slot].Enabled = state == FeatureState.Enabled;
+        if (player.Slot is < 0 or >= 65) return;
+
+        _players[player.Slot] = null;
+        _bhopSettings[player.Slot].Enabled = false;
+
+        if (player.IsValid)
+            SetBunnyhop(player, false);
     }
 
     private void SetBunnyhop(CCSPlayerController player, bool value)
     {
+        if (_bunnyhopReplicated[player.Slot] == value) return;
+        _bunnyhopReplicated[player.Slot] = value;
+
         player.ReplicateConVar("sv_autobunnyhopping", Convert.ToString(value));
         player.ReplicateConVar("sv_enablebunnyhopping", Convert.ToString(value));
     }
@@ -93,8 +148,9 @@ public class Bhop : VipFeatureBase
         if (flags.HasFlag(PlayerFlags.FL_ONGROUND) && buttons.HasFlag(PlayerButtons.Jump))
         {
             var maxSpeed = _bhopSettings[player.Slot].MaxSpeed;
-            if (Math.Round(playerPawn.AbsVelocity.Length2D()) > maxSpeed && maxSpeed is not 0)
-                ChangeVelocity(playerPawn, maxSpeed);
+            var speed = playerPawn.AbsVelocity.Length2D();
+            if (maxSpeed > 0 && speed > maxSpeed)
+                ChangeVelocity(playerPawn, maxSpeed + (speed - maxSpeed) * SpeedCapSmoothing);
 
             playerPawn.AbsVelocity.Z = 300;
             SetBunnyhop(player, true);
@@ -115,18 +171,20 @@ public class Bhop : VipFeatureBase
             {
                 settings.Active = false;
 
-                if (!IsClientVip(player) ||
-                    !PlayerHasFeature(player) ||
-                    GetPlayerFeatureState(player) is not FeatureState.Enabled) continue;
+                if (!IsFeatureEnabled(player)) continue;
 
                 SetBunnyhop(player, false);
 
-                var bhopSettings = GetFeatureValue<BhopSettings>(player);
+                var bhopSettings = GetValue(player);
+                if (bhopSettings is null) continue;
+
                 settings.MaxSpeed = bhopSettings.MaxSpeed;
 
                 PrintToChat(player, GetTranslatedText("bhop.TimeToActivation", bhopSettings.Timer));
                 _vipBhop.AddTimer(bhopSettings.Timer + gamerules.FreezeTime, () =>
                 {
+                    if (!player.IsValid || _players[player.Slot] is null || !IsFeatureEnabled(player)) return;
+
                     PrintToChat(player, GetTranslatedText("bhop.Activated"));
                     settings.Active = true;
                     SetBunnyhop(player, true);
@@ -141,12 +199,12 @@ public class Bhop : VipFeatureBase
     {
         if (pawn == null) return;
 
-        var currentVelocity = new Vector(pawn.AbsVelocity.X, pawn.AbsVelocity.Y, pawn.AbsVelocity.Z);
-        var currentSpeed = Math.Sqrt(currentVelocity.X * currentVelocity.X + currentVelocity.Y * currentVelocity.Y +
-                                     currentVelocity.Z * currentVelocity.Z);
+        var currentSpeed = pawn.AbsVelocity.Length2D();
+        if (currentSpeed <= 0) return;
 
-        pawn.AbsVelocity.X = (float)(currentVelocity.X / currentSpeed) * vel;
-        pawn.AbsVelocity.Y = (float)(currentVelocity.Y / currentSpeed) * vel;
+        var scale = vel / currentSpeed;
+        pawn.AbsVelocity.X *= scale;
+        pawn.AbsVelocity.Y *= scale;
     }
 
     private CCSGameRules? GetGameRules()

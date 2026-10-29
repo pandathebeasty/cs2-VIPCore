@@ -2,7 +2,9 @@
 using CounterStrikeSharp.API.Core.Capabilities;
 using RanksApi;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
+using VipCoreApi.Args;
+using System.Globalization;
 
 namespace VIP_ExperienceMultiplier;
 
@@ -10,11 +12,11 @@ public class VipExperienceMultiplier : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Experience Multiplier";
-    public override string ModuleVersion => "v1.0.0";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _vipApi;
     private IRanksApi? _ranksApi;
-    private ExperienceMultiplier _experienceMultiplier;
+    private ExperienceMultiplier? _experienceMultiplier;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     public override void OnAllPluginsLoaded(bool hotReload)
@@ -26,22 +28,19 @@ public class VipExperienceMultiplier : BasePlugin
         if (_ranksApi is null) return;
 
         _experienceMultiplier = new ExperienceMultiplier(this, _vipApi, _ranksApi);
-        _vipApi.RegisterFeature(_experienceMultiplier);
     }
 
     public override void Unload(bool hotReload)
     {
-        _vipApi?.UnRegisterFeature(_experienceMultiplier);
+        _experienceMultiplier?.Dispose();
     }
 }
 
-public class ExperienceMultiplier : VipFeatureBase
+public class ExperienceMultiplier : VipFeature<float>
 {
-    public override string Feature => "exp_multiplier";
+    private readonly float[] _multiplier = Enumerable.Repeat(1f, 70).ToArray();
 
-    private readonly float[] _multiplier = new float[70];
-
-    public ExperienceMultiplier(BasePlugin basePlugin, IVipCoreApi api, IRanksApi ranksApi) : base(api)
+    public ExperienceMultiplier(BasePlugin basePlugin, IVipCoreApi api, IRanksApi ranksApi) : base("exp_multiplier", api)
     {
         ranksApi.PlayerExperienceChanged += (controller, i) => (int)(i * _multiplier[controller.Slot]);
 
@@ -55,15 +54,34 @@ public class ExperienceMultiplier : VipFeatureBase
         });
     }
 
-    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    public override void OnPlayerAuthorized(CCSPlayerController player, string group)
     {
-        _multiplier[player.Slot] = state is FeatureState.Enabled ? GetFeatureValue<float>(player) : 1;
+        UpdateMultiplier(player);
     }
 
-    public override void OnPlayerSpawn(CCSPlayerController player)
+    public override void OnPlayerRemoved(CCSPlayerController player, string group)
     {
-        if (!PlayerHasFeature(player)) return;
+        _multiplier[player.Slot] = 1;
+    }
 
-        _multiplier[player.Slot] = GetPlayerFeatureState(player) is FeatureState.Enabled ? GetFeatureValue<float>(player) : 1;
+    public override void OnSelectItem(CCSPlayerController player, VipFeature feature)
+    {
+        UpdateMultiplier(player);
+    }
+
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip)
+    {
+        UpdateMultiplier(player);
+    }
+
+    private void UpdateMultiplier(CCSPlayerController player)
+    {
+        _multiplier[player.Slot] = IsFeatureEnabled(player) ? GetValue(player) : 1;
+    }
+
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        if (args.State == FeatureState.Enabled)
+            args.Display = $"[x{GetValue(args.Controller).ToString("0.##", CultureInfo.InvariantCulture)}]";
     }
 }

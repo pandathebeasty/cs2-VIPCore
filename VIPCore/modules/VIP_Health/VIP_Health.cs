@@ -3,6 +3,8 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Memory;
 using VipCoreApi;
+using VipCoreApi.Args;
+using VipCoreApi.Enums;
 
 namespace VIP_Health;
 
@@ -10,10 +12,10 @@ public class VipHealth : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Health";
-    public override string ModuleVersion => "v1.0.2";
+    public override string ModuleVersion => "v2.0.0";
 
     private IVipCoreApi? _api;
-    private Health _health;
+    private Health? _health;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -24,36 +26,37 @@ public class VipHealth : BasePlugin
         if (_api == null) return;
 
         _health = new Health(_api);
-        _api.RegisterFeature(_health);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_health);
+        _health?.Dispose();
     }
 }
 
-public class Health : VipFeatureBase
+public class Health : VipFeature<int>
 {
-    public override string Feature => "Health";
-
-    public Health(IVipCoreApi api) : base(api)
+    public Health(IVipCoreApi api) : base("Health", api)
     {
     }
 
-    public override void OnPlayerSpawn(CCSPlayerController player)
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip)
     {
-        if (!PlayerHasFeature(player)) return;
-        if (GetPlayerFeatureState(player) is not IVipCoreApi.FeatureState.Enabled) return;
+        if (!vip || !IsFeatureEnabled(player)) return;
 
         var playerPawn = player.PlayerPawn.Value;
 
-        var healthValue = GetFeatureValue<int>(player);
-
+        var healthValue = GetValue(player);
         if (healthValue <= 0 || playerPawn == null) return;
 
         playerPawn.Health = healthValue;
         playerPawn.MaxHealth = healthValue;
         Utilities.SetStateChanged(playerPawn, "CBaseEntity", "m_iHealth");
+    }
+    
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        if (args.State == FeatureState.Enabled)
+            args.Display = $"[{GetValue(args.Controller)}]";
     }
 }

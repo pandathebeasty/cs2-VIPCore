@@ -2,6 +2,8 @@
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Utils;
 using VipCoreApi;
+using VipCoreApi.Enums;
+using VipCoreApi.Args;
 
 namespace VIP_DecoyTeleport;
 
@@ -9,9 +11,9 @@ public class VipDecoyTeleport : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Decoy Teleport";
-    public override string ModuleVersion => "v1.0.0";
+    public override string ModuleVersion => "v2.0.0";
 
-    private DecoyTeleport _decoyTeleport;
+    private DecoyTeleport? _decoyTeleport;
     private IVipCoreApi? _api;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
@@ -22,21 +24,19 @@ public class VipDecoyTeleport : BasePlugin
         if (_api == null) return;
 
         _decoyTeleport = new DecoyTeleport(this, _api);
-                    _api.RegisterFeature(_decoyTeleport);
     }
 
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_decoyTeleport);
+        _decoyTeleport?.Dispose();
     }
 }
 
-public class DecoyTeleport : VipFeatureBase
+public class DecoyTeleport : VipFeature<int>
 {
-    public override string Feature => "DecoyTp";
     private readonly int[] _decoyCount = new int[65];
 
-    public DecoyTeleport(VipDecoyTeleport vipDecoyTeleport, IVipCoreApi api) : base(api)
+    public DecoyTeleport(VipDecoyTeleport vipDecoyTeleport, IVipCoreApi api) : base("DecoyTp", api)
     {
         vipDecoyTeleport.RegisterEventHandler<EventDecoyFiring>(EventDecoyFiring);
 
@@ -49,10 +49,10 @@ public class DecoyTeleport : VipFeatureBase
         });
     }
 
-    public override void OnPlayerSpawn(CCSPlayerController player)
+    public override void OnPlayerSpawn(CCSPlayerController player, bool vip)
     {
-        if (!PlayerHasFeature(player)) return;
-        if (GetPlayerFeatureState(player) is not IVipCoreApi.FeatureState.Enabled) return;
+        if (!vip) return;
+        if (!IsFeatureEnabled(player)) return;
 
         _decoyCount[player.Index] = 0;
 
@@ -69,18 +69,16 @@ public class DecoyTeleport : VipFeatureBase
         var controller = @event.Userid;
         var entityIndex = controller.Index;
 
-        if (!IsClientVip(controller)) return HookResult.Continue;
-        if (!PlayerHasFeature(controller)) return HookResult.Continue;
-        if (GetPlayerFeatureState(controller) is not IVipCoreApi.FeatureState.Enabled) return HookResult.Continue;
+        if (!IsFeatureEnabled(controller)) return HookResult.Continue;
 
         var pDecoyFiring = @event;
         //var bodyComponent = controller.PlayerPawn.Value?.CBodyComponent?.SceneNode;
         var playerPawn = controller.PlayerPawn.Value;
 
         //if (bodyComponent == null) return HookResult.Continue;
-        if (playerPawn == null) return HookResult.Continue;
+        if (playerPawn == null || !controller.PawnIsAlive) return HookResult.Continue;
 
-        var decoysPerRound = GetFeatureValue<int>(controller);
+        var decoysPerRound = GetValue(controller);
         if (_decoyCount[entityIndex] >= decoysPerRound && decoysPerRound > 0)
             return HookResult.Continue;
 
@@ -99,5 +97,15 @@ public class DecoyTeleport : VipFeatureBase
         new CBaseCSGrenadeProjectile(decoyIndex).Remove();
 
         return HookResult.Continue;
+    }
+
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        if (args.State != FeatureState.Enabled) return;
+
+        var limit = GetValue(args.Controller);
+        args.Display = limit > 0
+            ? $"[{Math.Max(limit - _decoyCount[args.Controller.Index], 0)}/{limit}]"
+            : "[∞]";
     }
 }

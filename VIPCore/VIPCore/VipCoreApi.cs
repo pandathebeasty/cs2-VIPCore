@@ -1,361 +1,210 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Menu;
 using Microsoft.Extensions.Logging;
+using VIPCore.Configs;
+using VIPCore.Player;
+using VIPCore.Services;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Args;
+using VipCoreApi.Enums;
 
 namespace VIPCore;
 
 public class VipCoreApi : IVipCoreApi
 {
-    private readonly VipCore _vipCore;
-    private Dictionary<ulong, PlayerCookie> _playersCookie = [];
+    private readonly Plugin _plugin;
+    private readonly PlayersManager _players;
+    private readonly FeatureManager _featureManager;
+    private readonly CookieService _cookies;
+    private readonly DatabaseProvider _dbProvider;
+    private readonly Config<VipConfig> _coreConfig;
+    private readonly Config<GroupsConfig> _groupsConfig;
 
-    public event Action<CCSPlayerController>? OnPlayerSpawn;
-    public event Action<CCSPlayerController, string>? PlayerLoaded;
-    public event Action<CCSPlayerController, string>? PlayerRemoved;
-    public event Action? OnCoreReady;
-    public event Func<CCSPlayerController, string, FeatureState, FeatureType, HookResult?>? OnPlayerUseFeature;
+    public VipCoreApi(
+        Plugin plugin,
+        PlayersManager players,
+        FeatureManager featureManager,
+        CookieService cookies,
+        DatabaseProvider dbProvider,
+        Config<VipConfig> coreConfig,
+        Config<GroupsConfig> groupsConfig)
+    {
+        _plugin = plugin;
+        _players = players;
+        _featureManager = featureManager;
+        _cookies = cookies;
+        _dbProvider = dbProvider;
+        _coreConfig = coreConfig;
+        _groupsConfig = groupsConfig;
 
-    public string GetTranslatedText(string name, params object[] args) => _vipCore.Localizer[name, args];
+        players.PlayerLoaded += player =>
+            Invoke(OnPlayerAuthorized, h => h(player.Controller, player.Group));
+        players.PlayerRemoved += (player, group) =>
+            Invoke(OnPlayerRemoved, h => h(player.Controller, group));
+        players.PlayerDisconnect += player =>
+            Invoke(OnPlayerDisconnect, h => h(player.Controller, player.IsVip));
+    }
 
-    public string CoreConfigDirectory { get; }
+    public string CoreConfigDirectory => ConfigSystem.CoreConfigDirectory;
     public string ModulesConfigDirectory => Path.Combine(CoreConfigDirectory, "Modules/");
-    public string GetDatabaseConnectionString => _vipCore.DbConnectionString;
-    private JsonSerializerOptions _jsonSerializerOptions = new JsonSerializerOptions { 
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        WriteIndented = true
-    };
+    public string DatabaseConnectionString => _dbProvider.ConnectionString;
+    public int ServerId => _coreConfig.Value.ServerId;
 
-    public VipCoreApi(VipCore vipCore)
-    {
-        _vipCore = vipCore;
-        CoreConfigDirectory = Path.Combine(Application.RootDirectory, "configs/plugins/VIPCore/");
-    }
-
-    public void CoreReady()
-    {
-        OnCoreReady?.Invoke();
-    }
-
-    public int GetServerId()
-    {
-        return _vipCore.CoreConfig.ServerId;
-    }
-
-    public void RegisterFeature(VipFeatureBase vipFeatureBase, FeatureType featureType = FeatureType.Toggle)
-    {
-        foreach (var config in _vipCore.Config.Groups)
-        {
-            if (vipFeatureBase.Feature == null || string.IsNullOrEmpty(vipFeatureBase.Feature)) continue;
-            config.Value.Values.TryAdd(vipFeatureBase.Feature, string.Empty);
-            foreach (var keyValuePair in config.Value.Values)
-            {
-                if (string.IsNullOrEmpty(keyValuePair.Value.ToString())) continue;
-
-                _vipCore.Features.TryAdd(vipFeatureBase.Feature, new Feature
-                {
-                    FeatureType = featureType,
-                    OnSelectItem = vipFeatureBase.OnSelectItem
-                });
-            }
-        }
-
-        _vipCore.PrintLogInfo("Feature '{feature}' registered successfully", vipFeatureBase.Feature);
-    }
-
-    public void UnRegisterFeature(VipFeatureBase vipFeatureBase)
-    {
-        foreach (var config in _vipCore.Config.Groups)
-        {
-            if (vipFeatureBase.Feature != null)
-            {
-                config.Value.Values.Remove(vipFeatureBase.Feature);
-                _vipCore.Features.Remove(vipFeatureBase.Feature, out _);
-            }
-        }
-
-        _vipCore.PrintLogInfo(
-            "Feature '{feature}' unregistered successfully", vipFeatureBase.Feature);
-    }
-
-    public IEnumerable<(string feature, object value)> GetAllRegisteredFeatures()
-    {
-        foreach (var config in _vipCore.Config.Groups)
-        {
-            foreach (var (key, value) in config.Value.Values)
-            {
-                yield return (key, value);
-            }
-        }
-    }
+    public IFeatureManager FeatureManager => _featureManager;
 
     public FeatureState GetPlayerFeatureState(CCSPlayerController player, string feature)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
-            throw new InvalidOperationException("player not found");
+        if (!IsPlayerVip(player, out var vipPlayer)) return FeatureState.NoAccess;
 
-        return user.FeatureState.GetValueOrDefault(feature, FeatureState.NoAccess);
+        return vipPlayer.FeatureStates.GetValueOrDefault(feature, FeatureState.NoAccess);
     }
 
     public void SetPlayerFeatureState(CCSPlayerController player, string feature, FeatureState newState)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
-            throw new InvalidOperationException("player not found");
+        if (!_players.TryGetPlayer(player, out var vipPlayer) || !vipPlayer.FeatureStates.ContainsKey(feature))
+            return;
 
-        if (!user.FeatureState.ContainsKey(feature))
-            throw new InvalidOperationException("feature not found");
+        if (newState is not FeatureState.NoAccess && !vipPlayer.HasFeature(feature))
+            return;
 
-        user.FeatureState[feature] = newState;
+        vipPlayer.FeatureStates[feature] = newState;
     }
 
-    public void DisableAllFeatures()
-    {
-        _vipCore.ForcedDisabledFeatures.Clear();
+    public bool IsPlayerVip(CCSPlayerController player) => IsPlayerVip(player, out _);
 
-        foreach (var feature in _vipCore.Features.Keys)
-        {
-            _vipCore.ForcedDisabledFeatures.Add(feature);
-        }
-    }
-
-    public void EnableAllFeatures()
+    private bool IsPlayerVip(CCSPlayerController player, out VipPlayer vipPlayer)
     {
-        _vipCore.ForcedDisabledFeatures.Clear();
-    }
-
-    public bool IsClientVip(CCSPlayerController player)
-    {
-        return _vipCore.IsPlayerVip(player) && _vipCore.IsCoreEnableConVar.Value;
+        return _players.TryGetPlayer(player, out vipPlayer!) && vipPlayer.IsVip && _plugin.EnableConVar.Value;
     }
 
     public bool PlayerHasFeature(CCSPlayerController player, string feature)
     {
-        if (_vipCore.ForcedDisabledFeatures.Contains(feature)) return false;
-
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user)) return false;
-
-        if (user is null or { group: null }) return false;
-
-        if (!_vipCore.Config.Groups.TryGetValue(user.group, out var vipGroup)) return false;
-
-        return vipGroup.Values.Any(vipGroupValue =>
-            vipGroupValue.Key == feature && !string.IsNullOrEmpty(vipGroupValue.Value.ToString()));
+        return IsPlayerVip(player, out var vipPlayer) && vipPlayer.HasFeature(feature);
     }
 
-    public string GetClientVipGroup(CCSPlayerController player)
+    public T? GetFeatureValue<T>(CCSPlayerController player, string feature)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
-            throw new InvalidOperationException("player not found");
+        if (!_players.TryGetPlayer(player, out var vipPlayer) || !vipPlayer.IsVip ||
+            !vipPlayer.Features.TryGetValue(feature, out var raw))
+            return default;
 
-        return user.group;
-    }
+        if (raw is T typed) return typed;
 
-    public string[] GetVipGroups()
-    {
-        var groups = _vipCore.Config.Groups;
-        if (groups.Count == 0)
-            return [];
+        var cacheable = typeof(T).IsValueType || typeof(T) == typeof(string);
+        var key = (feature, typeof(T));
+        if (cacheable && vipPlayer.FeatureValues.TryGetValue(key, out var cached)) return (T?)cached;
 
-        return groups.Keys.ToArray();
-    }
-
-    public void UpdateClientVip(CCSPlayerController player, string name = "", string group = "", int time = -1)
-    {
-        var steamId =
-            new SteamID(player.AuthorizedSteamID == null ? player.SteamID : player.AuthorizedSteamID.SteamId64);
-
-        Task.Run(() => _vipCore.Database.UpdateUserVip(steamId.AccountId, name, group, time));
-
-        var user = _vipCore.CreateNewUser(steamId.AccountId, name, group, time);
-        if (!_vipCore.Users.TryAdd(steamId.SteamId64, user))
-        {
-            _vipCore.Users[steamId.SteamId64] = user;
-        }
-
-        OnPlayerLoaded(player, group);
-    }
-
-    public void SetClientVip(CCSPlayerController player, string group, int time)
-    {
-        var name = player.PlayerName;
-
-        var authSteamId = player.AuthorizedSteamID;
-        if (authSteamId == null)
-        {
-            _vipCore.Logger.LogError($"AuthorizedSteamId is null");
-            return;
-        }
-
-        var accountId = authSteamId.AccountId;
-        var steamId64 = authSteamId.SteamId64;
-
-        OnPlayerLoaded(player, group);
-        Task.Run(() => SetClientVipAsync(name, accountId, group, time, steamId64));
-    }
-
-    private async Task SetClientVipAsync(string name, int accountId, string group, int time,
-        ulong steamId64)
-    {
         try
         {
-            var user = _vipCore.CreateNewUser(accountId, name, group, time);
-            await _vipCore.Database.UpdateUserInDb(user);
+            var value = raw is JsonElement element
+                ? element.Deserialize<T>(ConfigSystem.ConfigJsonOptions)
+                : JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(raw), ConfigSystem.ConfigJsonOptions);
 
-            if (_vipCore.Users.ContainsKey(steamId64))
-            {
-                _vipCore.Users[steamId64] = user;
-            }
+            if (cacheable)
+                vipPlayer.FeatureValues[key] = value;
+
+            return value;
         }
         catch (Exception e)
         {
-            Console.WriteLine(e);
+            _plugin.Logger.LogError("Failed to deserialize feature '{feature}' value '{value}' as {type}: {error}",
+                feature, raw, typeof(T).Name, e.Message);
+            return default;
         }
     }
 
-    public void GiveClientTemporaryVip(CCSPlayerController player, string group, int time)
+    public string GetPlayerVipGroup(CCSPlayerController player)
     {
-        GiveClientVip(player, group, time, true);
+        return _players.TryGetPlayer(player, out var vipPlayer) && vipPlayer.IsVip ? vipPlayer.Group : string.Empty;
     }
 
-    public void GiveClientVip(CCSPlayerController player, string group, int time)
+    public string[] GetVipGroups() => _groupsConfig.Value.Keys.ToArray();
+
+    public void UpdatePlayerVip(CCSPlayerController player, string name = "", string group = "", int time = -1)
     {
-        GiveClientVip(player, group, time, false);
+        if (!IsValidPlayer(player, nameof(UpdatePlayerVip))) return;
+        if (!string.IsNullOrEmpty(group) && !GroupExists(group)) return;
+
+        _players.UpdateVip(GetAccountId(player), player,
+            string.IsNullOrEmpty(name) ? null : name,
+            string.IsNullOrEmpty(group) ? null : group,
+            time < 0 ? null : _plugin.ExpiresIn(time));
     }
 
-    private void GiveClientVip(CCSPlayerController player, string group, int time, bool isTemporary)
+    public void SetPlayerVip(CCSPlayerController player, string group, int time)
     {
-        if (IsClientVip(player))
-            throw new Exception($"Player {player.PlayerName} already has a VIP");
+        if (!IsValidPlayer(player, nameof(SetPlayerVip))) return;
+        if (!GroupExists(group)) return;
 
-        var name = player.PlayerName;
+        _players.GiveVip(player, CreateVipData(player, group, time));
+    }
 
-        var authSteamId = player.AuthorizedSteamID;
-        if (authSteamId == null)
+    public void GivePlayerVip(CCSPlayerController player, string group, int time)
+    {
+        GivePlayerVip(player, group, time, false);
+    }
+
+    public void GivePlayerTemporaryVip(CCSPlayerController player, string group, int time)
+    {
+        GivePlayerVip(player, group, time, true);
+    }
+
+    private void GivePlayerVip(CCSPlayerController player, string group, int time, bool isTemporary)
+    {
+        if (!IsValidPlayer(player, nameof(GivePlayerVip))) return;
+
+        if (_players.TryGetPlayer(player, out var vipPlayer) && vipPlayer.IsVip)
         {
-            _vipCore.Logger.LogError($"AuthorizedSteamId is null");
+            _plugin.LogWarning("GivePlayerVip: player {name} already has VIP '{group}'", player.PlayerName,
+                vipPlayer.Group);
             return;
         }
 
-        var accountId = authSteamId.AccountId;
-        var steamId64 = authSteamId.SteamId64;
+        if (!GroupExists(group)) return;
 
-        OnPlayerLoaded(player, group);
-
-        var user = _vipCore.CreateNewUser(accountId, name, group, time);
-        _vipCore.Users.TryAdd(steamId64, user);
-        _vipCore.SetClientFeature(steamId64, group);
-        _vipCore.IsClientVip[player.Slot] = true;
-
-        if (!isTemporary)
-        {
-            Task.Run(() => _vipCore.Database.AddUserToDb(user));
-        }
+        _players.GiveVip(player, CreateVipData(player, group, time), isTemporary);
     }
 
-    public void RemoveClientVip(CCSPlayerController player)
+    public void RemovePlayerVip(CCSPlayerController player)
     {
-        var steamId = new SteamID(player.SteamID);
+        if (!IsValidPlayer(player, nameof(RemovePlayerVip))) return;
 
-        if (!_vipCore.Users.TryGetValue(steamId.SteamId64, out var user))
-            throw new InvalidOperationException("player not found");
+        if (!_players.TryGetPlayer(player, out var vipPlayer) || vipPlayer.Data is null)
+            _plugin.LogWarning("RemovePlayerVip: player {name} is not loaded as VIP, removing from database only",
+                player.PlayerName);
 
-        OnPlayerRemoved(player, user.group);
-        _vipCore.IsClientVip[player.Slot] = false;
-        Task.Run(() => RemoveClientVipAsync(steamId));
+        _players.RemoveVip(GetAccountId(player), player);
     }
 
-    private async Task RemoveClientVipAsync(SteamID steamId)
-    {
-        try
-        {
-            _vipCore.Users.Remove(steamId.SteamId64, out _);
-            await _vipCore.Database.RemoveUserFromDb(steamId.AccountId);
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e);
-        }
-    }
+    public void SetPlayerCookie<T>(ulong steamId64, string key, T value) => _cookies.Set(steamId64, key, value);
 
-    public void PrintToChat(CCSPlayerController player, string message)
-    {
-        _vipCore.PrintToChat(player, message);
-    }
+    public T GetPlayerCookie<T>(ulong steamId64, string key) => _cookies.Get<T>(steamId64, key);
 
-    public void PrintToChatAll(string message)
-    {
-        _vipCore.PrintToChatAll(message);
-    }
+    public void PrintToChat(CCSPlayerController player, string message) => _plugin.PrintToChat(player, message);
+
+    public void PrintToChatAll(string message) => _plugin.PrintToChatAll(message);
+
+    public string GetTranslatedText(CCSPlayerController player, string name, params object[] args) =>
+        _plugin.Translate(player, name, args);
+
+    public string GetTranslatedText(string name, params object[] args) => _plugin.Localizer[name, args];
 
     public bool IsPistolRound()
     {
-        var gamerules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").First().GameRules;
+        var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()
+            ?.GameRules;
+        if (gameRules == null) return false;
+
         var halftime = ConVar.Find("mp_halftime")!.GetPrimitiveValue<bool>();
-        var maxrounds = ConVar.Find("mp_maxrounds")!.GetPrimitiveValue<int>();
+        var maxRounds = ConVar.Find("mp_maxrounds")!.GetPrimitiveValue<int>();
 
-        if (gamerules == null) return false;
-        return gamerules.TotalRoundsPlayed == 0 || (halftime && maxrounds / 2 == gamerules.TotalRoundsPlayed) ||
-               gamerules.GameRestart;
-    }
-
-    // public void Startup()
-    // {
-    //     OnCoreReady?.Invoke();
-    // }
-
-    public void PlayerSpawn(CCSPlayerController player)
-    {
-        OnPlayerSpawn?.Invoke(player);
-    }
-
-    public void OnPlayerLoaded(CCSPlayerController player, string group)
-    {
-        PlayerLoaded?.Invoke(player, group);
-    }
-
-    public void OnPlayerRemoved(CCSPlayerController player, string group)
-    {
-        PlayerRemoved?.Invoke(player, group);
-    }
-
-    public HookResult? PlayerUseFeature(CCSPlayerController player, string feature, FeatureState state,
-        FeatureType type)
-    {
-        return OnPlayerUseFeature?.Invoke(player, feature, state, type);
-    }
-
-    public T GetFeatureValue<T>(CCSPlayerController player, string feature)
-    {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
-            throw new InvalidOperationException("User not found.");
-
-        if (_vipCore.Config.Groups.TryGetValue(user.group, out var vipGroup))
-        {
-            if (vipGroup.Values.TryGetValue(feature, out var value))
-            {
-                _vipCore.PrintLogInfo(
-                    "Checking feature: {feature} - {value}", feature, value);
-                try
-                {
-                    return ((JsonElement)value).Deserialize<T>(_jsonSerializerOptions)!;
-                }
-                catch (JsonException)
-                {
-                    _vipCore.PrintLogError(
-                        "Failed to deserialize feature '{feature}' value: {value}", feature, value);
-                    throw new JsonException($"Failed to deserialize feature '{feature}' value: {value}");
-                }
-            }
-        }
-
-        _vipCore.PrintLogError("Feature not found, returning default value: {empty}", "Empty");
-        throw new KeyNotFoundException($"Feature '{feature}' not found.");
+        return gameRules.TotalRoundsPlayed == 0 ||
+               (halftime && maxRounds / 2 == gameRules.TotalRoundsPlayed) ||
+               gameRules.GameRestart;
     }
 
     public T LoadConfig<T>(string name, string path)
@@ -365,104 +214,96 @@ public class VipCoreApi : IVipCoreApi
         if (!File.Exists(configFilePath))
         {
             var defaultConfig = Activator.CreateInstance<T>();
-
-            File.WriteAllText(configFilePath,
-                JsonSerializer.Serialize(defaultConfig, _jsonSerializerOptions));
+            File.WriteAllText(configFilePath, JsonSerializer.Serialize(defaultConfig, ConfigSystem.ConfigJsonOptions));
             return defaultConfig;
         }
 
-        var configJson = File.ReadAllText(configFilePath);
-        var config = JsonSerializer.Deserialize<T>(configJson, _jsonSerializerOptions);
-
-        if (config == null)
-            throw new FileNotFoundException($"File {name}.json not found or cannot be deserialized");
-
-        return config;
+        return JsonSerializer.Deserialize<T>(File.ReadAllText(configFilePath), ConfigSystem.ConfigJsonOptions) ??
+               throw new JsonException($"File {name}.json cannot be deserialized");
     }
 
-    public T LoadConfig<T>(string name)
-    {
-        return LoadConfig<T>(name, ModulesConfigDirectory);
-    }
+    public T LoadConfig<T>(string name) => LoadConfig<T>(name, ModulesConfigDirectory);
 
     public IMenu CreateMenu(string title)
     {
-        return _vipCore.CoreConfig.UseCenterHtmlMenu ? new CenterHtmlMenu(title, _vipCore) : new ChatMenu(title);
-    }
-
-    public void SetPlayerCookie<T>(ulong steamId64, string key, T value)
-    {
-        if (!_playersCookie.TryGetValue(steamId64, out var cookie))
+        return _coreConfig.Value.MenuType.ToLowerInvariant() switch
         {
-            cookie = new PlayerCookie
-            {
-                SteamId64 = steamId64,
-                Features = new Dictionary<string, object>()
-            };
-
-            _playersCookie[steamId64] = cookie;
-        }
-
-        cookie.Features[key] = value!;
+            "chat" => new ChatMenu(title),
+            "console" => new ConsoleMenu(title),
+            _ => new CenterHtmlMenu(title, _plugin)
+        };
     }
 
-    public T GetPlayerCookie<T>(ulong steamId64, string key)
+    public event OnPlayerAuthorizedDelegate? OnPlayerAuthorized;
+    public event OnPlayerRemovedDelegate? OnPlayerRemoved;
+    public event OnPlayerDisconnectDelegate? OnPlayerDisconnect;
+    public event OnPlayerSpawnDelegate? OnPlayerSpawn;
+    public event OnPlayerUseFeatureDelegate? OnPlayerUseFeature;
+    private Action? _onCoreReady;
+    private bool _coreReady;
+
+    public event Action? OnCoreReady
     {
-        if (_playersCookie.TryGetValue(steamId64, out var cookie) &&
-            cookie.Features.TryGetValue(key, out var featureValue))
+        add
+        {
+            if (_coreReady)
+                Invoke(value, h => h());
+            else
+                _onCoreReady += value;
+        }
+        remove => _onCoreReady -= value;
+    }
+
+    public void InvokeOnPlayerSpawn(CCSPlayerController player, bool isVip) =>
+        Invoke(OnPlayerSpawn, h => h(player, isVip));
+
+    public void InvokeOnPlayerUseFeature(PlayerUseFeatureEventArgs args) =>
+        Invoke(OnPlayerUseFeature, h => h(args));
+
+    public void InvokeOnCoreReady()
+    {
+        _coreReady = true;
+        Invoke(_onCoreReady, h => h());
+        _onCoreReady = null;
+    }
+
+    private void Invoke<T>(T? handlers, Action<T> invoke) where T : Delegate
+    {
+        if (handlers is null) return;
+
+        foreach (var handler in handlers.GetInvocationList().Cast<T>())
         {
             try
             {
-                switch (featureValue)
-                {
-                    case T typedValue:
-                        return typedValue;
-                    case JsonElement jsonElement:
-                        return jsonElement.Deserialize<T>(_jsonSerializerOptions)!;
-                }
-
-                var jsonString = featureValue.ToString();
-                if (jsonString != null)
-                {
-                    return JsonSerializer.Deserialize<T>(jsonString, _jsonSerializerOptions)!;
-                }
+                invoke(handler);
             }
             catch (Exception e)
             {
-                _vipCore.PrintLogError($"Failed to deserialize cookie value: {key}, {e}");
+                _plugin.Logger.LogError("Exception in {handler}: {e}",
+                    $"{handler.Method.DeclaringType?.FullName}.{handler.Method.Name}", e);
             }
         }
-
-        return default!;
     }
 
-
-    public void LoadCookies()
+    private bool GroupExists(string group)
     {
-        var filePath = Path.Combine(CoreConfigDirectory, "vip_core_cookie.json");
+        if (_groupsConfig.Value.ContainsKey(group)) return true;
 
-        if (!File.Exists(filePath))
-        {
-            File.WriteAllText(filePath, "[]");
-            return;
-        }
-
-        var fileContent = File.ReadAllText(filePath);
-        var cookies = JsonSerializer.Deserialize<List<PlayerCookie>>(fileContent, _jsonSerializerOptions);
-
-        if (cookies != null)
-        {
-            _playersCookie = cookies.ToDictionary(c => c.SteamId64, c => c);
-        }
+        _plugin.Logger.LogError("VIP group '{group}' was not found", group);
+        return false;
     }
 
-    public void SaveCookies()
+    private VipData CreateVipData(CCSPlayerController player, string group, int time) =>
+        _players.CreateVipData(GetAccountId(player), player.PlayerName, group, _plugin.ExpiresIn(time));
+
+    private bool IsValidPlayer(CCSPlayerController? player, string method)
     {
-        var filePath = Path.Combine(CoreConfigDirectory, "vip_core_cookie.json");
+        if (player is { IsValid: true }) return true;
 
-        var cookiesList = _playersCookie.Values.ToList();
-        var jsonContent = JsonSerializer.Serialize(cookiesList, _jsonSerializerOptions);
-
-        File.WriteAllText(filePath, jsonContent);
+        _plugin.LogWarning("{method}: player is not valid", method);
+        return false;
     }
+
+    private static int GetAccountId(CCSPlayerController player) =>
+        (player.AuthorizedSteamID ?? new SteamID(player.SteamID)).AccountId;
 }

@@ -4,7 +4,8 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Utils;
 using VipCoreApi;
-using static VipCoreApi.IVipCoreApi;
+using VipCoreApi.Enums;
+using VipCoreApi.Args;
 
 namespace VIP_Respawn;
 
@@ -12,9 +13,9 @@ public class VipRespawn : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Respawn";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "v2.0.0";
 
-    private Respawn _respawn;
+    private Respawn? _respawn;
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -26,33 +27,27 @@ public class VipRespawn : BasePlugin
         _api.OnCoreReady += () =>
         {
             _respawn = new Respawn(this, _api);
-            _api.RegisterFeature(_respawn, FeatureType.Selectable);
         };
     }
     
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_respawn);
+        _respawn?.Dispose();
     }
 }
 
-public class Respawn : VipFeatureBase
+public class Respawn : VipFeature<int>
 {
-    public override string Feature => "Respawn";
-
     private readonly VipRespawn _vipRespawn;
-    private readonly int?[] _usedRespawns = new int?[65];
+    private readonly Dictionary<ulong, int> _usedRespawns = new();
 
-    public Respawn(VipRespawn vipRespawn, IVipCoreApi api) : base(api)
+    public Respawn(VipRespawn vipRespawn, IVipCoreApi api) : base("Respawn", api, FeatureType.Selectable)
     {
         _vipRespawn = vipRespawn;
-        
-        vipRespawn.RegisterListener<Listeners.OnClientConnected>(slot => _usedRespawns[slot + 1] = 0);
-        vipRespawn. RegisterListener<Listeners.OnClientDisconnectPost>(slot => _usedRespawns[slot + 1] = null);
+
         vipRespawn.RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
-            for (var i = 0; i < _usedRespawns.Length; i ++)
-                _usedRespawns[i] = 0;
+            _usedRespawns.Clear();
 
             return HookResult.Continue;
         });
@@ -60,7 +55,7 @@ public class Respawn : VipFeatureBase
         vipRespawn.AddCommand("css_respawn", "", OnCmdVipCommand);
     }
 
-    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    public override void OnSelectItem(CCSPlayerController player, VipFeature feature)
     {
         PlayerRespawn(player);
     }
@@ -73,10 +68,10 @@ public class Respawn : VipFeatureBase
 
     private void PlayerRespawn(CCSPlayerController player)
     {
-        if (!IsClientVip(player)) return;
+        if (!IsPlayerVip(player)) return;
         if (!PlayerHasFeature(player)) return;
         
-        if (GetFeatureValue<int>(player) <= _usedRespawns[player.Index])
+        if (GetValue(player) <= _usedRespawns.GetValueOrDefault(player.SteamID))
         {
             PrintToChat(player, GetTranslatedText("respawn.Limit"));
             return;
@@ -100,7 +95,15 @@ public class Respawn : VipFeatureBase
 
         VirtualFunctions.CBasePlayerController_SetPawnFunc.Invoke(player, playerPawn, true, false);
         VirtualFunction.CreateVoid<CCSPlayerController>(player.Handle, GameData.GetOffset("CCSPlayerController_Respawn"))(player);
-        _usedRespawns[player.Index] ++;
+        _usedRespawns[player.SteamID] = _usedRespawns.GetValueOrDefault(player.SteamID) + 1;
         PrintToChat(player, GetTranslatedText("respawn.Success"));
+    }
+
+    public override void OnFeatureDisplay(FeatureDisplayArgs args)
+    {
+        var limit = GetValue(args.Controller);
+        var left = Math.Max(limit - _usedRespawns.GetValueOrDefault(args.Controller.SteamID), 0);
+
+        args.Display = $"[{left}/{limit}]";
     }
 }
