@@ -7,14 +7,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.374" />
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378" />
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="VipCoreApi">
-      <HintPath>..\..\VipCoreApi.dll</HintPath>
+    <ProjectReference Include="..\..\VipCoreApi\VipCoreApi.csproj">
       <Private>False</Private>
-    </Reference>
-    <!-- Shared ChatManager API (ships once in addons/counterstrikesharp/shared). -->
+    </ProjectReference>
+    
     <Reference Include="ChatManagerApi">
       <HintPath>3rd_party\ChatManagerApi.dll</HintPath>
       <Private>False</Private>
